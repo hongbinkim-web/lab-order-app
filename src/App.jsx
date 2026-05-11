@@ -321,28 +321,89 @@ function StockApp({ notify }) {
     const reader=new FileReader();
     reader.onload=(evt)=>{
       try {
-        const wb=XLSX.read(evt.target.result,{type:"binary"}); const ws=wb.Sheets[wb.SheetNames[0]];
-        const raw=XLSX.utils.sheet_to_json(ws,{header:1,defval:""});
-        let parsedBoxes=[]; let i=0;
-        while(i<raw.length){
-          const row=raw[i]; const boxCols=[];
-          row.forEach((cell,ci)=>{ if(String(cell).includes("Box Name")) boxCols.push(ci); });
-          if(boxCols.length>0){
-            boxCols.forEach(startCol=>{
-              const boxName=String(raw[i]?.[startCol+1]||"").trim()||`Box_${parsedBoxes.length+1}`;
+        const wb=XLSX.read(evt.target.result,{type:"binary"});
+        let parsedBoxes=[];
+
+        // 모든 시트 순회
+        wb.SheetNames.forEach(sheetName=>{
+          const ws=wb.Sheets[sheetName];
+          const raw=XLSX.utils.sheet_to_json(ws,{header:1,defval:""});
+
+          // 각 행을 순회하며 박스 찾기
+          for(let i=0;i<raw.length;i++){
+            const row=raw[i];
+
+            // "Box Name" 포함한 열 찾기
+            const boxNameCols=[];
+            row.forEach((cell,ci)=>{ if(String(cell).toLowerCase().includes("box name")) boxNameCols.push(ci); });
+            if(!boxNameCols.length) continue;
+
+            // 각 Box Name 열에 대해 처리
+            boxNameCols.forEach(bnCol=>{
+              // #R.n 헤더 행 찾기 (Box Name 행 바로 다음)
+              const headerRow=raw[i+1]||[];
+
+              // 컬럼 1~9 위치 찾기: #R.n 헤더에서 숫자 1~9 찾기
+              const colPositions={}; // colPositions[1] = 실제 열 인덱스
+              headerRow.forEach((cell,ci)=>{
+                const n=parseInt(String(cell).trim());
+                if(n>=1&&n<=9) colPositions[n]=ci;
+              });
+
+              // 행 레이블(A~I) 열 위치 찾기
+              // Box Name 열 기준으로 왼쪽이나 같은 열에서 A~I 레이블 찾기
+              let rowLabelCol=bnCol; // 기본값
+
+              // 데이터 행들 파싱 (i+2부터 최대 11행)
               const cells={};
-              for(let r=i+2;r<Math.min(i+12,raw.length);r++){
-                const dataRow=raw[r]; const rowLabel=String(dataRow[startCol]||"").trim();
-                const letter=ROWS.find(x=>x===rowLabel); if(!letter) continue;
-                for(let c=1;c<=9;c++){ const val=String(dataRow[startCol+c]||"").trim(); if(val) cells[`${letter}${c}`]=val; }
+              let boxName=`${sheetName}_Box${parsedBoxes.length+1}`;
+
+              for(let r=i+2;r<Math.min(i+13,raw.length);r++){
+                const dataRow=raw[r];
+
+                // 행 레이블(A~I) 찾기: 해당 행에서 A~I 값 찾기
+                let letter=null;
+                for(let ci=0;ci<Math.min(dataRow.length, bnCol+2);ci++){
+                  const v=String(dataRow[ci]||"").trim();
+                  if(ROWS.includes(v)){ letter=v; rowLabelCol=ci; break; }
+                }
+                if(!letter) continue;
+
+                // 박스 이름: 행 레이블 왼쪽 셀에서 찾기
+                if(!boxName.includes("_Box")){} // 이미 설정됨
+                const leftCell=String(dataRow[rowLabelCol-1]||"").trim();
+                if(leftCell && !ROWS.includes(leftCell) && !leftCell.includes("Box") && leftCell.length<20){
+                  boxName=leftCell;
+                }
+
+                // 1~9 컬럼 데이터 읽기
+                if(Object.keys(colPositions).length>0){
+                  // 헤더에서 찾은 컬럼 위치 사용
+                  for(let c=1;c<=9;c++){
+                    if(colPositions[c]!==undefined){
+                      const val=String(dataRow[colPositions[c]]||"").trim();
+                      if(val) cells[`${letter}${c}`]=val;
+                    }
+                  }
+                } else {
+                  // 폴백: bnCol+1 부터 9개
+                  for(let c=1;c<=9;c++){
+                    const val=String(dataRow[bnCol+c]||"").trim();
+                    if(val) cells[`${letter}${c}`]=val;
+                  }
+                }
               }
-              parsedBoxes.push({id:Date.now()+parsedBoxes.length,name:boxName,cells});
-            }); i+=12;
-          } else i++;
-        }
-        if(!parsedBoxes.length){notify("박스 데이터를 찾을 수 없습니다.");return;}
+
+              if(Object.keys(cells).length>0){
+                parsedBoxes.push({id:Date.now()+parsedBoxes.length+Math.random(),name:boxName,cells});
+              }
+            });
+          }
+        });
+
+        if(!parsedBoxes.length){notify("박스 데이터를 찾을 수 없습니다. 파일 구조를 확인해주세요.");return;}
         setImportModal({boxes:parsedBoxes}); e.target.value="";
-      } catch { notify("파일을 읽을 수 없습니다."); }
+      } catch(err) { notify("파일을 읽을 수 없습니다: "+err.message); }
     };
     reader.readAsBinaryString(file);
   };
