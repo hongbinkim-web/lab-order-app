@@ -353,79 +353,65 @@ function LN2Tab({ notify }) {
 
         wb.SheetNames.forEach(sheetName=>{
           if(sheetName.toLowerCase()==="deepfreezer") return;
-          // 디버그: 첫 20행 출력
-          const wsDebug=wb.Sheets[sheetName];
-          const rawDebug=XLSX.utils.sheet_to_json(wsDebug,{header:1,defval:""});
-          console.log(`=== 시트: ${sheetName} ===`);
-          rawDebug.slice(0,25).forEach((row,i)=>{ const nonEmpty=row.map((c,ci)=>c!==""?`[${ci}]=${c}`:"").filter(Boolean); if(nonEmpty.length>0) console.log(`행${i}: ${nonEmpty.join(" | ")}`); });
           const ws=wb.Sheets[sheetName];
           const raw=XLSX.utils.sheet_to_json(ws,{header:1,defval:""});
           const sheetData={};
 
-          // 숫자 헤더 행 찾기 (1~9가 연속으로 있는 행)
           for(let i=0;i<raw.length;i++){
-            const row=raw[i];
-            // 이 행에서 1~9 컬럼 위치 찾기
-            const colPos={};
-            row.forEach((cell,ci)=>{
-              const n=parseInt(String(cell||"").trim());
-              if(!isNaN(n)&&n>=1&&n<=9) colPos[n]=ci;
-            });
-            if(Object.keys(colPos).length<3) continue; // 최소 3개 컬럼 있어야 유효
+            const row=raw[i]||[];
 
-            // 랙 번호 찾기: 이 그리드 왼쪽에 #숫자 형태
-            let rackNum=null;
-            for(let ci=0;ci<Math.min(...Object.values(colPos));ci++){
-              const v=String(row[ci]||"").trim();
-              if(v.startsWith("#")){ rackNum=v.replace("#","").trim(); break; }
+            // 헤더행 감지: #숫자 패턴이 있는 행
+            // 구조: [#1] [A] [] [1] [2]...[9] [] [#2] [A] [] [1]...[9]
+            const groups=[];
+            for(let ci=0;ci<row.length;ci++){
+              const v=String(row[ci]??"").trim();
+              if(!/^#\d+$/.test(v)) continue;
+              const rack=v.replace("#","");
+
+              // 박스 레터: #숫자 바로 다음 셀 (ROW_SET 포함 모든 알파벳 허용)
+              let box="A";
+              for(let k=ci+1;k<=ci+3&&k<row.length;k++){
+                const bv=String(row[k]??"").trim();
+                if(/^[A-Z]$/.test(bv)){box=bv;break;}
+              }
+
+              // 1~9 컬럼 위치: ci 이후에서 찾기
+              const colPos={};
+              for(let k=ci+1;k<row.length&&k<ci+15;k++){
+                const n=parseInt(String(row[k]??"").trim());
+                if(!isNaN(n)&&n>=1&&n<=9) colPos[n]=k;
+              }
+              if(Object.keys(colPos).length>=5){
+                groups.push({rack, box, colPos, headerCol:ci});
+              }
             }
-            // 이전 행들에서도 찾기
-            if(!rackNum){
-              for(let r=Math.max(0,i-3);r<=i;r++){
-                for(let ci=0;ci<raw[r].length;ci++){
-                  const v=String(raw[r][ci]||"").trim();
-                  if(v.startsWith("#")&&/^#\d+$/.test(v)){ rackNum=v.replace("#","").trim(); break; }
-                }
-                if(rackNum) break;
-              }
-            }
-            if(!rackNum) rackNum="1";
-            if(!sheetData[rackNum]) sheetData[rackNum]={};
+            if(groups.length===0) continue;
 
-            // 데이터 행 파싱 (다음 행부터 A~I)
-            for(let r=i+1;r<Math.min(i+12,raw.length);r++){
-              const dr=raw[r];
-              // A~I 레이블 찾기
-              let letter=null, labelCol=-1;
-              for(let ci=0;ci<Math.min(colPos[1]??99, dr.length);ci++){
-                const v=String(dr[ci]??"").trim();
-                if(ROW_SET.has(v)){letter=v;labelCol=ci;break;}
-              }
-              if(!letter) continue;
+            // 데이터 행 파싱
+            for(let r=i+1;r<raw.length;r++){
+              const dr=raw[r]||[];
+              if(dr.every(c=>String(c??"").trim()==="")) break;
+              if(dr.some(c=>/^#\d+$/.test(String(c??"").trim()))) break;
 
-              let boxLetter=null;
-              for(let ci=0;ci<labelCol;ci++){
-                const v=String(dr[ci]??"").trim();
-                if(/^[A-Z]$/.test(v)&&!ROW_SET.has(v)){boxLetter=v;break;}
-              }
-              if(!boxLetter){
-                for(let r2=Math.max(0,r-8);r2<r;r2++){
-                  for(let ci=0;ci<(colPos[1]??5);ci++){
-                    const v=String((raw[r2]??[])[ci]??"").trim();
-                    if(/^[A-Z]$/.test(v)&&!ROW_SET.has(v)){boxLetter=v;break;}
-                  }
-                  if(boxLetter) break;
+              groups.forEach(({rack,box,colPos,headerCol})=>{
+                // 행 레이블: headerCol 기준 ±2 범위에서 A~I 찾기
+                let letter=null;
+                for(let k=Math.max(0,headerCol-1);k<=headerCol+3&&k<dr.length;k++){
+                  const v=String(dr[k]??"").trim();
+                  if(ROW_SET.has(v)){letter=v;break;}
                 }
-              }
-              if(!boxLetter) boxLetter="A";
-              if(!sheetData[rackNum][boxLetter]) sheetData[rackNum][boxLetter]={cells:{}};
+                if(!letter) return;
 
-              for(let c=1;c<=9;c++){
-                if(colPos[c]!==undefined){
-                  const val=String(dr[colPos[c]]||"").trim();
-                  if(val) sheetData[rackNum][boxLetter].cells[`${letter}${c}`]=val;
+                if(!sheetData[rack]) sheetData[rack]={};
+                if(!sheetData[rack][box]) sheetData[rack][box]={cells:{}};
+
+                for(let c=1;c<=9;c++){
+                  const ci=colPos[c];
+                  if(ci==null) continue;
+                  const val=String(dr[ci]??"").trim();
+                  if(val) sheetData[rack][box].cells[`${letter}${c}`]=val;
                 }
-              }
+              });
             }
           }
 
