@@ -119,8 +119,7 @@ function EditModal({ cellKey, content, onSave, onDelete, onClose }) {
 }
 
 // ── Deepfreezer 탭 ────────────────────────────────────────
-function DeepfreezerTab({ notify }) {
-  const [boxes, setBoxes] = useState(INIT_STORAGE.deepfreezer);
+function DeepfreezerTab({ notify, boxes, setBoxes }) {
   const [selBox, setSelBox] = useState(null);
   const [editModal, setEditModal] = useState(null);
   const [addModal, setAddModal] = useState(false);
@@ -150,41 +149,140 @@ function DeepfreezerTab({ notify }) {
         const wb=XLSX.read(evt.target.result,{type:"binary"});
         const ws=wb.Sheets["Deepfreezer"]||wb.Sheets[wb.SheetNames[0]];
         const raw=XLSX.utils.sheet_to_json(ws,{header:1,defval:""});
-        let parsed=[]; let i=0;
+
+        // 결과: boxName → cells
+        const boxMap={};
+        const getBox=(name)=>{ if(!boxMap[name]) boxMap[name]={cells:{}}; return boxMap[name]; };
+
+        let i=0;
         while(i<raw.length){
-          const row=raw[i];
-          const bnCols=[];
-          row.forEach((cell,ci)=>{ if(String(cell).toLowerCase().includes("box name")) bnCols.push(ci); });
-          if(bnCols.length>0){
-            bnCols.forEach(bc=>{
-              const headerRow=raw[i+1]||[];
+          const row=raw[i]||[];
+          const rowStr=row.map(c=>String(c??"").trim());
+
+          // ── 패턴 1: "Box Name : xxx" 행 ──
+          const boxNameCol=rowStr.findIndex(v=>v.toLowerCase().includes("box name"));
+          if(boxNameCol>=0){
+            // 같은 행에 여러 Box Name이 있을 수 있음
+            const boxNameGroups=[];
+            rowStr.forEach((v,ci)=>{
+              if(!v.toLowerCase().includes("box name")) return;
+              // Box Name 값: 같은 셀에 ":"뒤에 있거나 옆 셀
+              let bname=v.replace(/box name\s*:?\s*/i,"").trim();
+              if(!bname){ for(let k=ci+1;k<=ci+2;k++){ const nv=String((row[k]??"")).trim(); if(nv){bname=nv;break;} } }
+              boxNameGroups.push({ci, bname:bname||"Unknown"});
+            });
+
+            // 다음 행: #R.n 헤더
+            const headerRow=raw[i+1]||[];
+            const rnGroups=[];
+            headerRow.forEach((cell,ci)=>{
+              if(String(cell??"").trim()!=="#R.n") return;
               const colPos={};
-              headerRow.forEach((cell,ci)=>{ const n=parseInt(String(cell).trim()); if(n>=1&&n<=9) colPos[n]=ci; });
-              const cells={}; let boxName=`Box_${parsed.length+1}`;
-              for(let r=i+2;r<Math.min(i+13,raw.length);r++){
-                const dr=raw[r];
-                let letter=null;
-                for(let ci=0;ci<=bc+2;ci++){
-                  const v=String(dr[ci]||"").trim();
-                  if(ROWS.includes(v)){letter=v;break;}
-                }
-                if(!letter) continue;
-                // 박스 이름: 행 레이블 왼쪽에서 찾기
-                for(let ci=0;ci<bc;ci++){
-                  const v=String(dr[ci]||"").trim();
-                  if(v&&!ROWS.includes(v)&&v.length<20){boxName=v;break;}
-                }
-                if(Object.keys(colPos).length>0){
-                  for(let c=1;c<=9;c++){ if(colPos[c]!==undefined){const val=String(dr[colPos[c]]||"").trim();if(val)cells[`${letter}${c}`]=val;} }
-                } else {
-                  for(let c=1;c<=9;c++){ const val=String(dr[bc+c]||"").trim();if(val)cells[`${letter}${c}`]=val; }
-                }
+              for(let k=ci+1;k<headerRow.length&&k<ci+15;k++){
+                const n=parseInt(String(headerRow[k]??"").trim());
+                if(!isNaN(n)&&n>=1&&n<=9) colPos[n]=k;
               }
-              if(Object.keys(cells).length>0||boxName!==`Box_${parsed.length+1}`)
-                parsed.push({id:Date.now()+parsed.length,name:boxName,cells});
-            }); i+=12;
-          } else i++;
+              if(Object.keys(colPos).length>=3) rnGroups.push({ci,colPos});
+            });
+
+            // 각 #R.n 그룹과 가장 가까운 Box Name 매핑
+            const groupBoxNames=rnGroups.map(({ci:rci})=>{
+              let closest=null, minDist=9999;
+              boxNameGroups.forEach(({ci:bci,bname})=>{
+                const d=Math.abs(rci-bci);
+                if(d<minDist){minDist=d;closest=bname;}
+              });
+              return closest||"Unknown";
+            });
+
+            // 데이터 행 파싱 (i+2부터)
+            const dataStartRow=i+2;
+            // 박스 위치명(F1-A-x) 추적
+            const groupBoxPos=rnGroups.map(()=>null);
+
+            for(let r=dataStartRow;r<raw.length;r++){
+              const dr=raw[r]||[];
+              if(dr.every(c=>String(c??"").trim()==="")) break;
+              if(dr.some(c=>String(c??"").toLowerCase().includes("box name"))) break;
+              if(dr.some(c=>String(c??"").trim()==="#R.n")) break;
+
+              rnGroups.forEach(({ci:hci,colPos},gi)=>{
+                // 박스 위치명 업데이트
+                for(let k=Math.max(0,hci-3);k<=hci;k++){
+                  const v=String(dr[k]??"").trim();
+                  if(v&&v.match(/^F\d+-[A-Z]-\d+$/i)){groupBoxPos[gi]=v;break;}
+                }
+                // 행 레이블
+                let letter=null;
+                for(let k=Math.max(0,hci-1);k<=hci+2&&k<dr.length;k++){
+                  if(ROW_SET.has(String(dr[k]??"").trim())){letter=String(dr[k]??"").trim();break;}
+                }
+                if(!letter) return;
+
+                const bname=groupBoxNames[gi];
+                const box=getBox(bname);
+                for(let c=1;c<=9;c++){
+                  const ci2=colPos[c]; if(ci2==null) continue;
+                  const val=String(dr[ci2]??"").trim();
+                  if(val) box.cells[`${letter}${c}`]=val;
+                }
+              });
+            }
+            i+=2; continue;
+          }
+
+          // ── 패턴 2: "#R.n" 직접 헤더 ──
+          const isRnRow=rowStr.some(v=>v==="#R.n");
+          if(isRnRow){
+            const rnGroups=[];
+            rowStr.forEach((v,ci)=>{
+              if(v!=="#R.n") return;
+              const colPos={};
+              for(let k=ci+1;k<row.length&&k<ci+15;k++){
+                const n=parseInt(String(row[k]??"").trim());
+                if(!isNaN(n)&&n>=1&&n<=9) colPos[n]=k;
+              }
+              if(Object.keys(colPos).length>=3) rnGroups.push({ci,colPos});
+            });
+
+            const groupBoxNames=rnGroups.map(()=>null);
+
+            for(let r=i+1;r<raw.length;r++){
+              const dr=raw[r]||[];
+              if(dr.every(c=>String(c??"").trim()==="")) break;
+              if(dr.some(c=>String(c??"").toLowerCase().includes("box name"))) break;
+              if(dr.some(c=>String(c??"").trim()==="#R.n")) break;
+
+              rnGroups.forEach(({ci:hci,colPos},gi)=>{
+                // 박스명: hci 왼쪽에서 F1-A-x 패턴 찾기
+                for(let k=Math.max(0,hci-3);k<=hci;k++){
+                  const v=String(dr[k]??"").trim();
+                  if(v&&v.length>2&&!ROW_SET.has(v)&&!/^\d+$/.test(v)){
+                    groupBoxNames[gi]=v; break;
+                  }
+                }
+                let letter=null;
+                for(let k=Math.max(0,hci-1);k<=hci+2&&k<dr.length;k++){
+                  if(ROW_SET.has(String(dr[k]??"").trim())){letter=String(dr[k]??"").trim();break;}
+                }
+                if(!letter||!groupBoxNames[gi]) return;
+
+                const box=getBox(groupBoxNames[gi]);
+                for(let c=1;c<=9;c++){
+                  const ci2=colPos[c]; if(ci2==null) continue;
+                  const val=String(dr[ci2]??"").trim();
+                  if(val) box.cells[`${letter}${c}`]=val;
+                }
+              });
+            }
+          }
+          i++;
         }
+
+        const parsed=Object.entries(boxMap).map(([name,{cells}],idx)=>({
+          id:Date.now()+idx, name, cells
+        }));
+
         if(!parsed.length){notify("박스 데이터를 찾을 수 없습니다.");return;}
         setImportModal({boxes:parsed}); e.target.value="";
       } catch(err){notify("파일 읽기 오류: "+err.message);}
@@ -306,9 +404,7 @@ function DeepfreezerTab({ notify }) {
 }
 
 // ── LN2 탭 ────────────────────────────────────────────────
-function LN2Tab({ notify }) {
-  // ln2Data: { sheetName: { rackNum: { boxLetter: { cells } } } }
-  const [ln2Data, setLn2Data] = useState({});
+function LN2Tab({ notify, ln2Data, setLn2Data }) {
   const [selSheet, setSelSheet] = useState(null);
   const [selRack, setSelRack] = useState(null);
   const [selBox, setSelBox] = useState(null);
@@ -776,6 +872,31 @@ export default function App() {
   const [notif, setNotif] = useState("");
   const notify = useCallback((msg)=>{setNotif(msg);setTimeout(()=>setNotif(""),2400);},[]);
 
+  // 전역 상태 — 탭 이동해도 유지
+  const [dfBoxes, setDfBoxes] = useState(()=>{
+    try { const s=localStorage.getItem("df_boxes"); return s?JSON.parse(s):INIT_STORAGE.deepfreezer; } catch { return INIT_STORAGE.deepfreezer; }
+  });
+  const [ln2Data, setLn2Data] = useState(()=>{
+    try { const s=localStorage.getItem("ln2_data"); return s?JSON.parse(s):{}; } catch { return {}; }
+  });
+
+  // localStorage 동기화
+  const updateDfBoxes = useCallback((fn) => {
+    setDfBoxes(prev => {
+      const next = typeof fn === "function" ? fn(prev) : fn;
+      try { localStorage.setItem("df_boxes", JSON.stringify(next)); } catch {}
+      return next;
+    });
+  }, []);
+
+  const updateLn2Data = useCallback((fn) => {
+    setLn2Data(prev => {
+      const next = typeof fn === "function" ? fn(prev) : fn;
+      try { localStorage.setItem("ln2_data", JSON.stringify(next)); } catch {}
+      return next;
+    });
+  }, []);
+
   const S = {
     app:{fontFamily:"'Apple SD Gothic Neo','Malgun Gothic',sans-serif",maxWidth:860,margin:"0 auto",padding:"16px 16px 60px"},
     header:{padding:"14px 0 14px",display:"flex",alignItems:"center",borderBottom:"1.5px solid #f0f0f0",marginBottom:0},
@@ -806,8 +927,8 @@ export default function App() {
             <button style={{...S.stockTab,...(stockTab==="df"?S.stockTabActive:{})}} onClick={()=>setStockTab("df")}>❄️ Deepfreezer</button>
             <button style={{...S.stockTab,...(stockTab==="ln2"?S.stockTabActive:{})}} onClick={()=>setStockTab("ln2")}>🧊 LN2</button>
           </div>
-          {stockTab==="df"&&<DeepfreezerTab notify={notify}/>}
-          {stockTab==="ln2"&&<LN2Tab notify={notify}/>}
+          {stockTab==="df"&&<DeepfreezerTab notify={notify} boxes={dfBoxes} setBoxes={updateDfBoxes}/>}
+          {stockTab==="ln2"&&<LN2Tab notify={notify} ln2Data={ln2Data} setLn2Data={updateLn2Data}/>}
         </div>
       )}
 
