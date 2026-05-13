@@ -52,9 +52,40 @@ function Notification({ msg }) {
 
 // ── 그리드 컴포넌트 ───────────────────────────────────────
 function CellGrid({ cells, onCellClick }) {
+  const [dragStart, setDragStart] = useState(null);
+  const [dragOver, setDragOver] = useState(null);
+  const [dragging, setDragging] = useState(false);
+
+  const getDraggedCells = () => {
+    if (!dragStart || !dragOver) return new Set();
+    const r1 = ROWS.indexOf(dragStart[0]), r2 = ROWS.indexOf(dragOver[0]);
+    const c1 = dragStart[1], c2 = dragOver[1];
+    const minR = Math.min(r1,r2), maxR = Math.max(r1,r2);
+    const minC = Math.min(c1,c2), maxC = Math.max(c1,c2);
+    const result = new Set();
+    for(let r=minR;r<=maxR;r++)
+      for(let c=minC;c<=maxC;c++)
+        result.add(`${ROWS[r]}${c}`);
+    return result;
+  };
+
+  const handleMouseUp = () => {
+    if (dragging && dragStart && dragOver && dragStart !== dragOver) {
+      const sourceContent = cells[dragStart] || "";
+      const draggedCells = getDraggedCells();
+      draggedCells.delete(dragStart);
+      if (draggedCells.size > 0 && sourceContent) {
+        onCellClick(dragStart, sourceContent, [...draggedCells], sourceContent);
+      }
+    }
+    setDragStart(null); setDragOver(null); setDragging(false);
+  };
+
+  const draggedSet = getDraggedCells();
+
   return (
-    <div style={{overflowX:"auto"}}>
-      <table style={{borderCollapse:"collapse",fontSize:11}}>
+    <div style={{overflowX:"auto"}} onMouseUp={handleMouseUp} onMouseLeave={handleMouseUp}>
+      <table style={{borderCollapse:"collapse",fontSize:11,userSelect:"none"}}>
         <thead>
           <tr>
             <th style={{padding:"4px 8px",background:"#f5f5f5",border:"1px solid #e0e0e0",color:"#888",fontWeight:600,minWidth:28}}></th>
@@ -69,9 +100,19 @@ function CellGrid({ cells, onCellClick }) {
                 const key=`${row}${col}`;
                 const content=cells[key]||"";
                 const color=getCellColor(content);
+                const isStart=dragStart===key;
+                const isDragged=draggedSet.has(key);
                 return (
-                  <td key={col} onClick={()=>onCellClick(key,content)}
-                    style={{padding:0,border:"1px solid #e8e8e8",width:72,height:52,cursor:"pointer",background:color?`${color}18`:"#fff",transition:"background 0.1s"}}>
+                  <td key={col}
+                    onMouseDown={(e)=>{e.preventDefault();setDragStart(key);setDragging(false);}}
+                    onMouseEnter={()=>{ if(dragStart&&dragStart!==key){setDragging(true);setDragOver(key);}}}
+                    onClick={()=>{ if(!dragging) onCellClick(key, content); }}
+                    style={{
+                      padding:0, border:"1px solid #e8e8e8", width:72, height:52, cursor:"pointer",
+                      background: isStart ? `${getCellColor(content)||"#2563eb"}40` : isDragged ? "#dbeafe" : color?`${color}18`:"#fff",
+                      outline: isStart ? "2px solid #2563eb" : isDragged ? "1.5px dashed #2563eb" : "none",
+                      transition:"background 0.05s"
+                    }}>
                     <div style={{width:"100%",height:"100%",display:"flex",alignItems:"center",justifyContent:"center",padding:"2px 3px",fontSize:10,lineHeight:1.3,textAlign:"center",overflow:"hidden",color:color||"#bbb"}}>
                       {content
                         ? <span title={content}>{content.length>32?content.slice(0,30)+"…":content}</span>
@@ -128,13 +169,21 @@ function DeepfreezerTab({ notify, boxes, setBoxes }) {
   const [subTab, setSubTab] = useState("map");
   const [nextId, setNextId] = useState(50);
   const [importModal, setImportModal] = useState(null);
+  const [editBoxName, setEditBoxName] = useState(null); // {id, name}
 
   const box = selBox ? boxes.find(b=>b.id===selBox) : null;
 
-  const updateCell = (boxId, key, val) => {
-    setBoxes(prev=>prev.map(b=>b.id===boxId
-      ? {...b, cells: val ? {...b.cells,[key]:val} : Object.fromEntries(Object.entries(b.cells).filter(([k])=>k!==key))}
-      : b));
+  const updateCell = (boxId, key, val, dragTargets, dragVal) => {
+    setBoxes(prev=>prev.map(b=>{
+      if(b.id!==boxId) return b;
+      let newCells={...b.cells};
+      if(val) newCells[key]=val; else delete newCells[key];
+      // 드래그 복사
+      if(dragTargets&&dragVal){
+        dragTargets.forEach(k=>{ if(dragVal) newCells[k]=dragVal; else delete newCells[k]; });
+      }
+      return {...b, cells:newCells};
+    }));
   };
 
   const searchResults = search.trim().length > 1
@@ -329,7 +378,10 @@ function DeepfreezerTab({ notify, boxes, setBoxes }) {
           <div style={S.boxGrid}>
             {boxes.map(b=>(
               <div key={b.id} style={{...S.boxCard,...(selBox===b.id?S.boxCardActive:{})}} onClick={()=>setSelBox(selBox===b.id?null:b.id)}>
-                <div>{b.name}</div>
+                <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:4}}>
+                  <span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{b.name}</span>
+                  <span style={{fontSize:11,color:"#aaa",cursor:"pointer",flexShrink:0}} onClick={e=>{e.stopPropagation();setEditBoxName({id:b.id,name:b.name});}}>✏️</span>
+                </div>
                 <div style={{fontSize:11,color:"#999",marginTop:3}}>{Object.keys(b.cells).length}/81칸</div>
               </div>
             ))}
@@ -341,7 +393,14 @@ function DeepfreezerTab({ notify, boxes, setBoxes }) {
               <div style={{display:"flex",flexWrap:"wrap",gap:8,marginBottom:10}}>
                 {LEGEND.map(l=><div key={l.label} style={{display:"flex",alignItems:"center",gap:4,fontSize:11,color:"#555"}}><div style={{width:10,height:10,borderRadius:3,background:l.color}}/>{l.label}</div>)}
               </div>
-              <CellGrid cells={box.cells} onCellClick={(key,content)=>setEditModal({boxId:box.id,cellKey:key,content})}/>
+              <CellGrid cells={box.cells} onCellClick={(key,content,dragTargets,dragVal)=>{
+                if(dragTargets){
+                  updateCell(box.id,key,content,dragTargets,dragVal);
+                  notify(`${dragTargets.length}개 칸에 복사됨`);
+                } else {
+                  setEditModal({boxId:box.id,cellKey:key,content});
+                }
+              }}/>
             </div>
           )}
           {!box&&boxes.length>0&&<div style={S.empty}>박스를 선택하세요</div>}
@@ -360,6 +419,22 @@ function DeepfreezerTab({ notify, boxes, setBoxes }) {
             </div>;
           })}
           {search.trim().length<=1&&<div style={S.empty}>2글자 이상 입력하세요</div>}
+        </div>
+      )}
+
+      {editBoxName&&(
+        <div style={S.modalBg} onClick={()=>setEditBoxName(null)}>
+          <div style={S.modal} onClick={e=>e.stopPropagation()}>
+            <div style={{fontSize:15,fontWeight:700,marginBottom:14}}>✏️ 박스명 수정</div>
+            <input style={S.input} value={editBoxName.name}
+              onChange={e=>setEditBoxName(n=>({...n,name:e.target.value}))}
+              onKeyDown={e=>{if(e.key==="Enter"){setBoxes(p=>p.map(b=>b.id===editBoxName.id?{...b,name:editBoxName.name}:b));setEditBoxName(null);notify("박스명 수정됨");}}}
+              autoFocus/>
+            <div style={{display:"flex",gap:8,justifyContent:"flex-end",marginTop:14}}>
+              <button style={S.btnG} onClick={()=>setEditBoxName(null)}>취소</button>
+              <button style={S.btnP} onClick={()=>{setBoxes(p=>p.map(b=>b.id===editBoxName.id?{...b,name:editBoxName.name}:b));setEditBoxName(null);notify("박스명 수정됨");}}>저장</button>
+            </div>
+          </div>
         </div>
       )}
 
@@ -418,12 +493,13 @@ function LN2Tab({ notify, ln2Data, setLn2Data }) {
   const boxes = (selSheet&&selRack) ? Object.keys(ln2Data[selSheet][selRack]||{}).sort() : [];
   const cells = (selSheet&&selRack&&selBox) ? (ln2Data[selSheet]?.[selRack]?.[selBox]?.cells||{}) : null;
 
-  const updateCell = (key, val) => {
+  const updateCell = (key, val, dragTargets, dragVal) => {
     setLn2Data(prev=>{
       const updated=JSON.parse(JSON.stringify(prev));
       if(!updated[selSheet]?.[selRack]?.[selBox]) return prev;
-      if(val) updated[selSheet][selRack][selBox].cells[key]=val;
-      else delete updated[selSheet][selRack][selBox].cells[key];
+      const c=updated[selSheet][selRack][selBox].cells;
+      if(val) c[key]=val; else delete c[key];
+      if(dragTargets&&dragVal) dragTargets.forEach(k=>{ if(dragVal) c[k]=dragVal; else delete c[k]; });
       return updated;
     });
   };
@@ -596,7 +672,14 @@ function LN2Tab({ notify, ln2Data, setLn2Data }) {
               <div style={{display:"flex",flexWrap:"wrap",gap:8,marginBottom:10}}>
                 {LEGEND.map(l=><div key={l.label} style={{display:"flex",alignItems:"center",gap:4,fontSize:11,color:"#555"}}><div style={{width:10,height:10,borderRadius:3,background:l.color}}/>{l.label}</div>)}
               </div>
-              <CellGrid cells={cells} onCellClick={(key,content)=>setEditModal({key,content})}/>
+              <CellGrid cells={cells} onCellClick={(key,content,dragTargets,dragVal)=>{
+                if(dragTargets){
+                  updateCell(key,content,dragTargets,dragVal);
+                  notify(`${dragTargets.length}개 칸에 복사됨`);
+                } else {
+                  setEditModal({key,content});
+                }
+              }}/>
             </div>
           )}
         </div>
@@ -898,7 +981,7 @@ export default function App() {
   }, []);
 
   const S = {
-    app:{fontFamily:"'Apple SD Gothic Neo','Malgun Gothic',sans-serif",maxWidth:860,margin:"0 auto",padding:"16px 16px 60px"},
+    app:{fontFamily:"'Apple SD Gothic Neo','Malgun Gothic',sans-serif",maxWidth:860,margin:"0 auto",padding:"16px 16px 60px", background:"#ffffff", minHeight:"100vh"},
     header:{padding:"14px 0 14px",display:"flex",alignItems:"center",borderBottom:"1.5px solid #f0f0f0",marginBottom:0},
     mainTabs:{display:"flex",background:"#f5f5f5",borderRadius:12,padding:4,gap:4,margin:"16px 0 20px"},
     mainTab:{flex:1,padding:"10px",fontSize:14,background:"transparent",border:"none",borderRadius:9,cursor:"pointer",color:"#888",fontWeight:600},
